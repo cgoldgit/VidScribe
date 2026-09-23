@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output directories
+output/
+tmp_subs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AI 助手工作文件（本机使用，不提交）
+memory/
+.claude/settings.local.json
+CLAUDE.md
+
+# dedicated Chrome capture profile (cookies, large)
+.capture-profile/
+
+# exported cookies (never commit login state)
+cookies.txt
+*.cookies.txt
+
+# 多P 分册表（仓库默认不提供；处理合集时按需生成，任务结束后可删除）
+books.json

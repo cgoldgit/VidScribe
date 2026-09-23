@@ -1,0 +1,14 @@
+[project]
+name = "vidscribe"
+version = "0.1.0"
+description = "把在线课程视频整理成 Markdown 图文电子书，并可按需渲染 HTML"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# 本文件目前只记录项目名称、版本、简介和 Python 版本等元数据。
+# 运行依赖统一维护在 requirements.txt 中，请使用：
+#   python -m pip install -r requirements.txt
+# 当前没有在 [project] 中声明 dependencies，因此不要运行 `uv sync`，
+# 否则 uv 可能把环境中未声明的运行依赖移除。
+# 如果以后改用 uv，应先把全部依赖迁移到这里并生成锁文件，
+# 再在全新虚拟环境中验证安装和测试结果。
