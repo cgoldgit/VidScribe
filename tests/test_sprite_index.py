@@ -98,6 +98,66 @@ def test_cap_is_respected_even_when_everything_changes():
     assert len(segs) == 18
 
 
+def test_budget_merge_does_not_replace_selected_page_with_later_page():
+    cells = _build([0.0, 0.9, 0.2, 0.6])
+    segs, diffs = si.pick_segments(cells, _times(4), max_cells=2)
+    assert [s["start"] for s in segs] == [0, 1]
+    assert [s["rep"] for s in segs] == [0, 1], segs
+    assert segs[1]["visual_end"] == 2 and segs[1]["end"] == 4
+    candidates = si.candidate_catalog(cells, _times(4), 20, diffs)
+    assert [c["seconds"] for c in candidates] == [0, 5, 10, 15]
+    assert candidates[-1]["until"] == 20
+
+
+def test_candidate_catalog_keeps_small_black_slide_changes():
+    cells = _build([0.0, 0.02, 0.0, 0.03, 0.0])
+    candidates = si.candidate_catalog(cells, _times(5), 25)
+    assert len(candidates) == 3
+    assert all(c["weak"] for c in candidates[1:])
+    assert [c["seconds"] for c in candidates] == [0, 10, 20]
+
+
+def test_detail_window_keeps_existing_full_overview_and_records_omissions():
+    import sys
+    d = tempfile.mkdtemp(prefix="vs_detail_")
+    real = si.BASE_DIR, si.fetch_cid, si.fetch_sprite, si.load_sprites, sys.argv
+    try:
+        si.BASE_DIR = d
+        si.fetch_cid = lambda *a: (123, "Lecture", 100, "part")
+        si.fetch_sprite = lambda *a: (["https://unused"], _times(20))
+        # 一张图册正好有 100 格；只有前 20 格有时间戳。
+        sprite = np.zeros((180, 320, 3), dtype=np.uint8)
+        for i in range(100):
+            r, c = divmod(i, 10)
+            sprite[r * 18:(r + 1) * 18, c * 32:(c + 1) * 32] = _base(i)
+        si.load_sprites = lambda *a: [sprite]
+        full = os.path.join(d, "output", "BVtest1")
+        os.makedirs(os.path.join(full, "sprite"))
+        original = b"original full overview"
+        full_index = os.path.join(full, "sprite_index.json")
+        full_sheet = os.path.join(full, "sprite", "sheet_01.png")
+        for p in (full_index, full_sheet):
+            with open(p, "wb") as f:
+                f.write(original)
+        sys.argv = ["sprite_index.py", "BVtest1", "--start", "00:00:20",
+                    "--end", "60", "--grid", "2", "--max-sheets", "1"]
+        si.main()
+        for p in (full_index, full_sheet):
+            assert open(p, "rb").read() == original
+        detail = os.path.join(full, "visual_detail", "20_60", "sprite_index.json")
+        index = json.load(open(detail, encoding="utf-8"))
+        assert index["total_cells"] == 8
+        assert len(index["candidates"]) == 8
+        assert len(index["omitted_candidates"]) == 4
+        assert index["coverage"]["overview_complete"] is False
+        assert index["coverage"]["scope_start"] == 20
+        assert index["coverage"]["scope_end"] == 60
+        assert all(20 <= c["seconds"] < 60 for c in index["candidates"])
+    finally:
+        si.BASE_DIR, si.fetch_cid, si.fetch_sprite, si.load_sprites, sys.argv = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_long_video_fills_weak_changes_for_coverage():
     """只有弱变化的长视频：补点要铺满全片，不能全挤在一头。
 

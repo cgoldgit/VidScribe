@@ -42,8 +42,9 @@ flowchart LR
     T -->|平台字幕| TJ[transcript.json]
     T -->|无平台字幕| ASR[本地 ASR]
     ASR --> TJ
-    TJ --> W[AI 内容重构]
-    SI[Bilibili 画面索引] --> W
+    TJ --> NP[完整文本阅读包与来源计划]
+    SI[Bilibili 完整候选目录与概览] --> NP
+    NP --> W[AI 逐包写作与按需核图]
     W --> BM[book.md + SCREENSHOT 占位符]
     BM --> C[浏览器截图]
     C -->|失败时兜底| E[下载视频并抽帧]
@@ -51,7 +52,8 @@ flowchart LR
     E --> IMG
     IMG --> M[占位符物化]
     M --> FINAL[book.md + book.tagged.md]
-    FINAL -. 用户要求 HTML 或发布 .-> H[HTML 渲染]
+    FINAL --> QA[审阅一致性与图片审计]
+    QA -. 用户要求 HTML 或发布 .-> H[HTML 渲染]
     H --> HTML[book.html]
     HTML --> P[本地预览或 pages 发布]
 ```
@@ -66,10 +68,14 @@ Bilibili 的画面索引用于选择截图时间，不是最终配图。YouTube 
 | --- | --- | --- | --- |
 | `transcript.json` | `dump_transcript.py` 或 `asr_transcript.py` | AI 助手、字幕工具 | 两种来源保持同一字段结构 |
 | `transcript.txt` | 字幕提取流程 | 人工检查、对照稿工具 | 按时间顺序保存文本 |
-| `sprite_index.json` | `sprite_index.py` | AI 助手 | 记录候选画面时间和变化信息 |
+| `sprite_index.json` | `sprite_index.py` | AI 助手、分包与截图 | schema 2 的完整变化候选不受概览展示预算限制，包含未展示清单与采样限制 |
 | `sprite/sheet_*.png` | `sprite_index.py` | AI 助手 | 只用于定位和选择截图时间 |
+| `visual_detail/<起秒>_<止秒>/` | `sprite_index.py --start/--end` | AI 助手 | 独立局部索引，避免覆盖根概览 |
+| `note_plan.summary.md`、`note_plan.json`、`note_packets/` | `note_plan.py` | AI 助手、审计 | 轻量摘要用于阅读入口；完整原句 ID 每句只归属一包，边界上下文单独标记；来源和索引 SHA 用于识别陈旧输入 |
+| `note_review.json` | AI 助手 | `note_audit.py` | 原句去向、标题、省略理由、视觉需求及审阅范围，工具不会覆盖 |
+| `note_audit.json` | `note_audit.py` | AI 助手、人工验收 | 结构错误与相似图片警告；不能证明语义完整 |
 | `book.md` | AI 助手，随后由物化步骤更新 | 截图、渲染、发布 | 截图前可含 `SCREENSHOT:`，完成后不得残留 |
-| `book.tagged.md` | 截图物化步骤 | 后续重截 | 保存原始截图占位符清单 |
+| `book.tagged.md` | 截图物化步骤 | 审计与正文缺失时兜底 | 保存当前物化前稿件，当前 `book.md` 优先，已物化链接可用于重截 |
 | `images/shot_*.png` | 截图或抽帧模块 | 渲染、发布 | 文件名编码目标时间戳 |
 | `capture_manifest.json` | `capture_frames.py` | 审计和故障排查 | 记录请求时间、实际截图时间和结果 |
 | `book.html` | `post_process.py` | 本地预览、发布 | 按需从已物化的 Markdown 生成 |
@@ -98,6 +104,8 @@ ASR 还可能生成 `_asr_prompt.txt`、`_asr_progress.jsonl`、`_info.json`、`
 | `src/batch_transcripts.py` | 多分P 批量字幕提取和失败汇总 |
 | `src/asr_transcript.py` | 音频下载、本地转写、断点续跑和统一输出 |
 | `src/make_corrected.py` | 生成保留原始顺序的修正版字幕对照稿 |
+| `src/note_plan.py` | 生成完整文本包、来源 ID、关键词线索与审阅模板，不调用模型 |
+| `src/note_audit.py` | 检查成品引用、时间、来源审阅与图片相似风险，不改正文、不自动删图 |
 
 ### 画面选择与截图
 
@@ -137,7 +145,7 @@ ASR 还可能生成 `_asr_prompt.txt`、`_asr_progress.jsonl`、`_info.json`、`
 
 截图模块必须验证时间戳范围、播放器跳转结果和图片内容。失败帧不能写入正式文件，也不能触发占位符物化。新截图先写入临时文件，通过检查后再替换正式图片；重截失败不能删除已有的合格图片。
 
-截图时间清单来自 `book.tagged.md` 或尚未物化的 `book.md`。物化完成后保留 `book.tagged.md`，使后续补帧和重截仍有稳定输入。
+截图时间清单优先来自当前 `book.md` 的占位符或已物化图片链接；正文不存在时才读取 `book.tagged.md`。物化时同步对照稿，避免改写正文后仍按旧选图截图。schema 2 的完整候选目录可约束稳定帧选择和重拍区间，但采样边界不能证明真实页面切换的精确时刻。
 
 ### 写入过程应可恢复
 

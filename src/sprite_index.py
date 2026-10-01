@@ -3,7 +3,7 @@
 B 站播放器为了让用户悬停进度条时看到画面预览，会预先抽取全片每 5 秒一帧、
 拼成 10x10 的大图（videoshot 接口）。本脚本把这份现成的「画面相册」取回来，
 切成小格、再拼成若干张带时间戳标签的九宫格，供 AI 在写文章之前
-**先看一遍全片画面**，从而：
+先看预算内的画面概览，并按需要局部细查，从而：
 
   1. 从真实画面里挑截图点（而不是凭字幕猜时间戳）
   2. 对比相邻两格判断画面是否已稳定（动画是否播完）
@@ -13,16 +13,18 @@ B 站播放器为了让用户悬停进度条时看到画面预览，会预先抽
     output/<video_id>/sprite/sheet_NN.png    九宫格索引图（每格 480x270）
     output/<video_id>/sprite_index.json      格子 → 时间戳 对照表
 
-索引图上的每格是**该段画面的代表帧**（段末格：动画播完的那一帧），烧的时间戳
+索引图上的每格是该画面段的代表帧（下一次明显变化前的最后采样格），烧的时间戳
 就是这一格自己的时刻，格式 HH:MM:SS（与正文里的 `SCREENSHOT:HH:MM:SS` 一致）。
 对照表每格另有 since（这画面从何时开始）与 until（持续到何时）。
 
 张数有上限（默认 2 张）：换页点太多时只保留差异最大的那些，其余并回相邻段，
-并在该格的 merged 里记下「并掉了几个变化点」，不会静默消失。
+完整变化候选以文本保存在 candidates，未展示的候选另记在 omitted_candidates。
+预览图本身的采样间隔可能漏掉短暂画面，概览不等于全片完整覆盖。
 
 用法:
     python src/sprite_index.py <video_id> [--grid 3] [--max-sheets 2]
                               [--limit N] [--all-cells] [--out DIR]
+                              [--start SECONDS_OR_HMS] [--end SECONDS_OR_HMS]
 
 <video_id> 支持 `BV1xx411c7mD` 或 `BV1xx411c7mD_p7`（分P）形式。
 
@@ -312,14 +314,41 @@ def pick_segments(cells, times, max_cells, per_sheet=None,
     segs = []
     for j, b in enumerate(bounds):
         end = bounds[j + 1] if j + 1 < len(bounds) else n
+        # 预算丢掉的换页不能改变已保留那一页的代表帧。
+        # end 仍记录 overview 合并范围，visual_end 记录画面本身的边界。
+        visual_end = min([i for i in strong if b < i < end] or [end])
         segs.append({
             "start": b,
-            "rep": end - 1,                      # 段末格
+            "rep": visual_end - 1,
             "end": end,
+            "visual_end": visual_end,
             "weak": bool(b and d[b] < gray_hi),
             "merged": sum(1 for i in cand if b < i < end),
         })
     return segs, d
+
+
+def candidate_catalog(cells, times, duration, diffs=None, gray_hi=T_GRAY):
+    """完整变化目录只保存文本元数据，不受读图预算限制。
+
+    弱变化也保留为待判断候选，不宣称每个候选都是真正换页。
+    """
+    if not times:
+        return []
+    diffs = neighbor_diffs(cells) if diffs is None else diffs
+    starts = [0] + [i for i in range(1, len(times)) if diffs[i] > T_SAME]
+    result = []
+    for j, start in enumerate(starts):
+        end = starts[j + 1] if j + 1 < len(starts) else len(times)
+        rep = end - 1
+        result.append({
+            "id": f"candidate_{j + 1:04d}", "start_index": start,
+            "rep_index": rep, "seconds": times[rep], "time": fmt_hms(times[rep]),
+            "since": times[start], "until": times[end] if end < len(times) else duration,
+            "weak": bool(start and diffs[start] < gray_hi),
+            "ratio": round(diffs[start], 6), "overview_visible": False,
+        })
+    return result
 
 
 def fmt_hms(sec) -> str:
@@ -389,7 +418,13 @@ def main() -> None:
                     help=f"「灰区」上界：变化占比低于此值视为弱变化（可能只是字幕滚动），"
                          f"默认 {T_GRAY}")
     ap.add_argument("--out", default=None, help="输出目录（默认 output/<video_id>）")
+    ap.add_argument("--start", type=timecode.parse_seconds, default=None,
+                    help="局部细查起点（秒或 HH:MM:SS），输出到独立 visual_detail 子目录")
+    ap.add_argument("--end", type=timecode.parse_seconds, default=None,
+                    help="局部细查终点，不包含该时刻；默认到片尾")
     args = ap.parse_args()
+    if args.end is not None and args.end <= (args.start or 0):
+        ap.error("--end must be greater than --start")
 
     bvid, p = split_bilibili_id(args.video_id)
     # 画面索引走的是 B 站独有的 videoshot 接口，YouTube 没有等价物。这里显式跳过，
@@ -399,9 +434,15 @@ def main() -> None:
         print(f">> 「{args.video_id}」不是 B 站视频：画面索引仅支持 B 站，"
               "本步已跳过（不是完成），请按原方式从字幕推断配图点。")
         return
-    vdir = args.out or os.path.join(BASE_DIR, "output", args.video_id)
+    root_vdir = os.path.join(BASE_DIR, "output", args.video_id)
+    detail = args.start is not None or args.end is not None
+    vdir = args.out or (os.path.join(root_vdir, "visual_detail",
+                        f"{args.start or 0}_{args.end if args.end is not None else 'end'}")
+                       if detail else root_vdir)
     sprite_dir = os.path.join(vdir, "sprite")
     os.makedirs(sprite_dir, exist_ok=True)
+    cache_dir = os.path.join(root_vdir, "sprite") if detail and not args.out else sprite_dir
+    os.makedirs(cache_dir, exist_ok=True)
 
     print(f">> 取视频信息 {bvid} p{p} ...")
     cid, title, duration, part = fetch_cid(bvid, p)
@@ -414,13 +455,24 @@ def main() -> None:
     print(f"   图册 {len(urls)} 张，时间戳 {len(times)} 个，覆盖 0~{times[-1]}s")
 
     cells, cw, ch = [], 0, 0
-    for i, sprite in enumerate(load_sprites(urls, sprite_dir)):
+    for i, sprite in enumerate(load_sprites(urls, cache_dir)):
         part_cells, cw, ch = cut_cells(sprite, SPRITE_COLS, SPRITE_ROWS)
         cells.extend(part_cells)
 
     # 只保留有时间戳的格子（末尾可能有多余空位）
     n = min(len(cells), len(times))
     cells, times = cells[:n], times[:n]
+    if not n:
+        sys.exit("预览图册没有可用的采样格")
+    scope_start = args.start or 0
+    scope_end = min(args.end, duration) if args.end is not None and duration else args.end
+    scope_end = scope_end if scope_end is not None else (duration or times[-1] + 1)
+    if detail:
+        selected = [i for i, t in enumerate(times) if scope_start <= t < scope_end]
+        cells, times = [cells[i] for i in selected], [times[i] for i in selected]
+        n = len(times)
+    if not n:
+        sys.exit("所选时间区间没有预览采样帧；请扩大区间或直接截图该时刻")
 
     grid_n = max(2, args.grid)
     per_sheet = grid_n * grid_n
@@ -430,7 +482,7 @@ def main() -> None:
     if args.all_cells:
         segs = [{"start": i, "rep": i, "end": i + 1, "weak": False, "merged": 0}
                 for i in range(n)]
-        diffs = []
+        diffs = neighbor_diffs(cells)
         print(f"   --all-cells：{n} 格全部输出（忽略 {args.max_sheets} 张的上限）")
     else:
         segs, diffs = pick_segments(cells, times, max_cells, per_sheet,
@@ -440,7 +492,7 @@ def main() -> None:
         sheets = (len(segs) + per_sheet - 1) // per_sheet
         print(f"   画面段 {len(segs)} 段 → {sheets} 张索引图"
               f"（上限 {args.max_sheets} 张 / {max_cells} 格；"
-              f"从 {n} 格中压掉 {n - len(segs)} 格重复"
+              f"从 {n} 格中省略 {n - len(segs)} 格采样画面"
               + (f"；并入 {merged} 个次要变化点" if merged else "")
               + (f"；其中 {n_weak} 段是补的弱变化，像素上分不出是不是真换页"
                  if n_weak else "") + "）")
@@ -463,7 +515,10 @@ def main() -> None:
     # until = 这画面持续到的时刻：下一段的起始格时刻；最后一段到**真实片长**
     #（旧版用 times[-1]，即最后一个采样时刻，比片长少几秒，末段长度会算成 0）
     tail = duration or times[-1]
-    key_until = [times[s["end"]] if s["end"] < n else tail for s in segs]
+    tail = min(tail, scope_end)
+    key_until = [times[s.get("visual_end", s["end"])]
+                 if s.get("visual_end", s["end"]) < n else tail for s in segs]
+    key_overview_until = [times[s["end"]] if s["end"] < n else tail for s in segs]
     key_weak = [s["weak"] for s in segs]
     key_merged = [s["merged"] for s in segs]
 
@@ -511,6 +566,7 @@ def main() -> None:
                  "time": fmt_hms(chunk_times[i]),    # 与正文 SCREENSHOT:HH:MM:SS 同格式
                  "since": chunk_since[i],            # 这画面从何时开始
                  "until": chunk_until[i],            # 持续到何时（末段 = 片长）
+                 "overview_until": key_overview_until[s * per_sheet + i],
                  "weak": chunk_weak[i],              # 该段是弱变化：可能是字幕滚动而非换页
                  "merged": chunk_merged[i]}          # 段内被并掉的次要变化点个数
                 for i in range(len(chunk_cells))
@@ -518,7 +574,13 @@ def main() -> None:
         })
         print(f"   {name}  第 {s + 1}/{total} 张  ({len(chunk_cells)} 格)")
 
+    candidates = candidate_catalog(cells, times, tail, diffs, args.change_ratio)
+    visible = {c["seconds"] for sh in sheets_meta for c in sh["cells"]}
+    for candidate in candidates:
+        candidate["overview_visible"] = candidate["seconds"] in visible
+    omitted = [c["id"] for c in candidates if not c["overview_visible"]]
     index = {
+        "schema_version": 2,
         "video_id": args.video_id,
         "bvid": bvid,
         "page": p,
@@ -536,12 +598,20 @@ def main() -> None:
         "key_cells": m,
         "sheets": sheets_meta,
         "merged_top": merged_top,
-        "note": "每格是该段画面的**代表帧**（段末格＝动画播完的那一帧）：seconds/time 就是"
+        "candidates": candidates,
+        "omitted_candidates": omitted,
+        "coverage": {"scope_start": scope_start, "scope_end": scope_end,
+                     "sample_interval_max": max([b - a for a, b in zip(times, times[1:])] or [0]),
+                     "omitted_count": len(omitted), "overview_complete": not omitted,
+                     "sampling_can_miss_short_scenes": True},
+        "note": "每格是该画面段的代表帧（下一次明显变化前的最后采样格）：seconds/time 就是"
                 "这一格自己的时刻，正文的 SCREENSHOT 直接用它；since/until 是这段画面的起止"
                 "时刻（until 为片长表示它是最后一段）；weak=true 表示这格与前格差异很小，"
                 "可能只是字幕滚动，也可能是一张黑底幻灯片换页——看画面自己判断；"
-                "merged>0 表示这段里还有几个次要变化点没单独出图（需要更细的地图就加 "
-                "--max-sheets N 重跑）。索引图仅 480x270 用于定位，最终配图需回播放器截高清帧。",
+                "merged>0 表示 overview 合并了变化点；candidates 保留完整变化目录，"
+                "omitted_candidates 明确记录未展示的候选。可用 --start/--end 局部细查，"
+                "默认另存 visual_detail 子目录。预览采样可能漏掉短暂画面，"
+                "索引图仅用于定位，最终配图需回播放器截高清帧。",
     }
     with open(jpath, "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, indent=2)

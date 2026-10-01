@@ -216,6 +216,67 @@ def test_pick_stable_without_samples_returns_target():
     assert cf._pick_stable([], 42.0) == (42.0, "no-samples")
 
 
+def test_indexed_page_blocks_higher_ink_from_next_page():
+    samples = [_s(119.0, 0.20, True), _s(120.0, 0.25, True),
+               _s(122.0, 0.90, True)]
+    assert cf._pick_stable(samples, 120, (110, 121)) == (120, "stable-near")
+    assert cf._pick_stable(samples[2:], 120, (110, 121)) == (120, "indexed-target")
+
+
+def test_current_book_is_authoritative_and_materialized_links_can_be_recaptured():
+    d = _tmpdir()
+    try:
+        imgdir = _book(d, ["00:00:10"], images=["00:00:10"])
+        vdir = os.path.dirname(imgdir)
+        # tagged 来自旧稿，新正文只要求 20 秒的图片。
+        with open(os.path.join(vdir, "book.tagged.md"), "w", encoding="utf-8") as f:
+            f.write("![old](SCREENSHOT:00:00:10)")
+        with open(os.path.join(vdir, "book.md"), "w", encoding="utf-8") as f:
+            f.write("![new](SCREENSHOT:00:00:20)")
+        got = []
+        code, out = _run_main(d, ["BVtest1"], capture=_capture_noop(got))
+        assert code == 0 and got == [20], out
+        # 已物化正文仍可通过 --force 升画质，旧 tagged 不参与决定。
+        with open(os.path.join(vdir, "book.md"), "w", encoding="utf-8") as f:
+            f.write("![new](images/shot_00_00_20.png)")
+        got = []
+        code, out = _run_main(d, ["BVtest1", "--force"], capture=_capture_noop(got))
+        assert code == 0 and got == [20], out
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_empty_frame_retry_cannot_cross_indexed_page_boundary():
+    d = _tmpdir()
+    try:
+        page = _FakePage(
+            seek_results=[{"ok": True, "dur": 300, "actual": 57},
+                          {"ok": True, "dur": 300, "actual": 59.8}],
+            sample_result={"samples": [_s(59.8, 0.3, True)]},
+            shot_images=[np.zeros((720, 1280, 3), dtype=np.uint8)])
+        result = cf._shoot(page, 60, "shot_00_01_00", d, ["fake"], (57, 61))
+        assert not result.ok and "边界" in result.reason, result
+        assert not result.retried
+        assert not os.path.exists(os.path.join(d, "shot_00_01_00.png"))
+        assert not os.path.exists(os.path.join(d, "shot_00_01_00.partial.png"))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_actual_seek_beyond_index_boundary_is_rejected_before_grab():
+    d = _tmpdir()
+    try:
+        page = _FakePage(
+            seek_results=[{"ok": True, "dur": 300, "actual": 57},
+                          {"ok": True, "dur": 300, "actual": 61.1}],
+            sample_result={"samples": [_s(60, 0.3, True)]})
+        result = cf._shoot(page, 60, "shot_00_01_00", d, ["fake"], (57, 61))
+        assert not result.ok and "边界" in result.reason
+        assert page.written == []
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ───────────────────────── SEEK_JS / SAMPLE_JS 静态检查 ─────────────────────────
 
 def test_seek_js_has_timeouts_and_no_unreplaced_placeholder():

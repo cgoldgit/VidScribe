@@ -4,6 +4,10 @@ VidScribe 是一个由 AI 助手编排的视频内容整理工具，支持将 Yo
 
 项目负责字幕提取、画面索引、截图、HTML 渲染和发布；AI 助手根据字幕与画面完成内容重构。完整执行规则见 [instructions.md](instructions.md)，模块设计与数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
+默认笔记采用课堂实录风格，沿讲解顺序保留例子、推导、演示和结果。字幕先由本地工具分成完整阅读包，agent 按包写作并记录来源去向；图片按视觉需求查看，概览展示预算与完整候选目录分开，避免为了减少读图而丢掉候选。成品检查会报告缺图、待处理需求、含糊时间和相似图片，语义完整性仍需对照来源复核。
+
+Claude Code 的项目入口是 [CLAUDE.md](CLAUDE.md)。可直接要求它按 `instructions.md` 生成课堂实录式笔记，并完成 `note_review.json` 与 `note_audit.py --require-review` 检查。不同成本与质量方案、GitHub 参考和工程限制见 [quality_options.md](docs/quality_options.md)。
+
 ## 默认输出格式
 
 VidScribe 默认生成 Markdown 成品，不自动渲染 HTML，也不启动本地网页预览。Markdown 中如有关键画面，成品还会引用同目录下的 `images/`，因此交付内容可能包括 `book.md` 和配套图片。
@@ -89,8 +93,11 @@ https://www.bilibili.com/video/BVxxxxxxxxxx/
 | 路径 | 用途 |
 | --- | --- |
 | `transcript.json` | 字幕、视频元数据和章节信息 |
+| `note_plan.summary.md`、`note_plan.json`、`note_packets/` | 轻量阅读入口、完整清单与原句包，含来源 SHA 与候选画面线索 |
+| `note_review.json` | agent 填写的原句去向、视觉需求与审阅记录 |
+| `note_audit.json` | 本地文件、时间、审阅一致性和图片相似检查报告 |
 | `book.md` | 包含正文和图片引用的 Markdown 成品 |
-| `book.tagged.md` | 截图占位符物化前的稿件，用于重新截帧 |
+| `book.tagged.md` | 随当前稿同步的截图占位符对照稿 |
 | `images/` | 关键画面截图 |
 | `book.html` | 明确要求 HTML、网页预览或发布时生成的 HTML 成品 |
 | `transcript.corrected.txt` | 可选的修正版字幕对照稿 |
@@ -168,6 +175,8 @@ git push origin pages
 | 路径 | 内容 |
 | --- | --- |
 | `instructions.md` | AI 助手执行完整工作流时遵循的操作规程 |
+| `CLAUDE.md` | Claude Code 的精简项目入口 |
+| `docs/quality_options.md` | 成本取舍、GitHub 参考与待验证能力 |
 | `ARCHITECTURE.md` | 系统模块、数据流、文件契约和安全边界 |
 | `src/` | 字幕、截图、渲染、合并与发布脚本 |
 | `prompts/` | 单视频和多分集内容重构规则 |

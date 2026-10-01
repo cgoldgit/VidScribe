@@ -97,19 +97,35 @@ python src/sprite_index.py <video_id>
 
 YouTube 没有对应的预览图册接口，跳过本命令。
 
-生成书稿前必须读取：
+默认采用课堂实录式笔记：沿原讲解顺序清理口癖，保留例子、推导、演示过程、纠错和结果。用户指定其他风格时采用用户要求。成本控制采用文字先读、相关画面按需核查；不以固定字数或图片张数判断完成。
 
-- `output/<video_id>/transcript.json`
-- Bilibili 视频的画面索引图和 `sprite_index.json`
-- `prompts/stitcher_system.md`
+先生成完整文本阅读包，不调用模型：
 
-按照写作规范将内容写入：
+```bash
+python src/note_plan.py <video_id>
+```
+
+读取 `prompts/stitcher_system.md`、轻量入口 `note_plan.summary.md`，然后按清单顺序逐包读取 `note_packets/P*.md`。完整 `note_plan.json` 留给程序核验，避免入口阶段重复读取所有原句 ID 和候选元数据。每句有稳定 ID，前后文单独标记；按清单读取，避免读取旧包。分包按字符、时长和平台章节控制输入大小，agent 仍需识别跨包的同一例子或推导。
+
+首次从 `note_review.template.json` 复制 `note_review.json`，已有记录则继续编辑。记录每句写入的标题或省略理由，以及每个视觉需求的时间、用途、状态和标题。填写 `visual_review` 与 `visual_review_reason`，未检查画面不能把空需求清单当作无漏图证明。来源 SHA 变化时旧审阅作废；`note_plan.py --force` 重建阅读包但保留旧审阅，需重新核对。
+
+有配图需求时读取相关索引图。`sprite_index.json` 的 `candidates` 保存所有检测到的变化段元数据，`omitted_candidates` 指出概览未展示的候选；默认两张概览只限制展示预算。需要细查时运行：
+
+```bash
+python src/sprite_index.py <video_id> --start 00:51:00 --end 00:55:40 --all-cells
+```
+
+局部索引另存到 `visual_detail/<起秒>_<止秒>/`，不会覆盖根目录概览。只查看当前需求涉及的索引和必要高清帧，记录已确认的画面用途，后续通过时间和文件引用复用。预览采样之间的短暂画面仍可能缺失；没有索引的 YouTube 视频先由字幕提出需求，再截候选帧确认，不得凭字幕声称看过画面。
+
+按照写作规范将正文写入：
 
 ```text
 output/<video_id>/book.md
 ```
 
-需要配图的位置使用 `SCREENSHOT:HH:MM:SS` 占位符。Bilibili 的截图时间优先取自画面索引；索引图只用于定位，不能替代最终高清截图。
+需要配图的位置使用 `SCREENSHOT:HH:MM:SS` 占位符。正文参考时间也使用 `HH:MM:SS`，例如 `*(参考时间: 00:51:25)*`。Bilibili 的截图时间优先取自画面索引；索引图只用于定位，不能替代最终高清截图。逐包核查正文是否保留原例子的条件、步骤和结果；小结不能替代这些内容。
+
+使用多个 agent 时由主 agent 管理目录、术语、审阅合并和完成检查；子 agent 只读分配的阅读包和候选画面，各写独立草稿，由主 agent 合稿。并行数量按任务需要控制，避免每个 agent 重复读取完整字幕和所有图片。项目不自动调用或配置模型供应商。
 
 #### 字幕对照稿
 
@@ -144,7 +160,7 @@ python src/capture_frames.py --setup-profile
 - 命令退出码为 0。
 - 当脚本实际执行截图时，`capture_manifest.json` 记录本轮结果；仅复用已有图片时不会重新生成记录。
 
-脚本会检查时间戳越界、跳转失败和空白画面。任一必需帧失败时，命令返回非零退出码，不得把当前状态报告为完成。根据失败清单修正 `book.md` 或 `book.tagged.md` 后重新执行；默认只补缺失或不合格的图片。
+脚本会检查时间戳越界、跳转失败和空白画面；根目录存在完整候选目录时，还会约束在候选区间内选择稳定帧，降低跨页漂移风险。任一必需帧失败时，命令返回非零退出码，不得把当前状态报告为完成。根据失败清单修正当前 `book.md` 后重新执行；默认只补缺失或不合格的图片。已物化的图片链接仍可重截；`book.tagged.md` 由物化同步，用于追溯，旧副本不覆盖当前正文的选图。
 
 重截选项：
 
@@ -176,7 +192,17 @@ python src/extract_frames.py <video_id> "<VIDEO_URL>"
 
 ### 4. 按需渲染并预览 HTML
 
-只有用户明确要求 HTML、网页版本、浏览器预览或 GitHub Pages 发布时，才执行本步骤。默认的 Markdown 工作流完成第 3 步后直接进入完成报告。
+先完成 Markdown 质量检查：
+
+```bash
+python src/note_audit.py <video_id> --require-review
+```
+
+产出 `note_audit.json`。错误项（缺图、残留占位符、含糊或越界时间、过期来源、未覆盖原句、未处理图片需求）须修正；相同或近似图片列为警告，逐对检查是否包含新代码、公式或操作状态，再决定合并或保留。工具不会自动删图。`needs_review` 表示仍有警告需复核，退出码 0 仅代表没有结构错误；`checks_passed` 也不能证明语义完整。
+
+交付前对照原句抽查主要例子的条件、推导步骤、操作反馈与图片实际内容，特别检查字幕指图但文字未解释清楚的位置。旧笔记缺少来源审阅时，可先运行不带 `--require-review` 的审计识别文件、时间和重复风险，再补计划与审阅。
+
+只有用户明确要求 HTML、网页版本、浏览器预览或 GitHub Pages 发布时，才执行下面的渲染命令。默认 Markdown 完成检查后进入完成报告。
 
 ```bash
 python src/post_process.py "<VIDEO_URL>" output/<video_id>/book.md
@@ -201,6 +227,8 @@ http://localhost:8080/book.html
 - 本次未要求 HTML、但目标目录已有旧 `book.html` 时，说明该文件未在本次任务中更新
 - 截图失败、网络限制或未验证项
 - 截图实际使用的登录状态和可达到的画质范围
+- `note_audit.json` 的结果、已复核的重复警告、尚未确认的语义和视觉问题
+- 能获取时提供模型实际 usage、视觉读取次数和运行时间；无法获取时明确未测，不按索引图张数推算 token 费用
 
 如果流程生成了 `audio.*` 或 `video_source.mp4` 等大文件，列出文件后询问用户是否删除。未获得明确确认时不得删除。
 

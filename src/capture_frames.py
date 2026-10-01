@@ -51,7 +51,7 @@ import sys
 from dataclasses import asdict, dataclass
 from typing import List
 
-from extract_frames import materialize
+from extract_frames import materialize, current_source, requested_timestamps
 import timecode
 from video_id import split_bilibili_id
 
@@ -163,7 +163,7 @@ def fmt_ts(sec: float) -> str:
 def parse_timestamps(source_md: str):
     with open(source_md, encoding="utf-8") as f:
         content = f.read()
-    return sorted(set(PLACEHOLDER_RE.findall(content)))
+    return requested_timestamps(content)
 
 
 def malformed_placeholders(source_md: str):
@@ -442,7 +442,7 @@ class ShotResult:
     reason: str = ""
 
 
-def _pick_stable(samples, target):
+def _pick_stable(samples, target, bounds=None):
     """从采样序列里挑最适合截图的时刻，返回 (秒, 选法标签)。
 
     按优先级：
@@ -461,6 +461,10 @@ def _pick_stable(samples, target):
     所以第 1 档的「近点」过滤在生产里几乎恒等于"全部稳定点"，第 2 档很少命中 ——
     它是**将来放宽采样窗口时的安全网**，别把它当成现在的主力判据。
     """
+    if bounds is not None:
+        samples = [s for s in samples if bounds[0] <= s["t"] < bounds[1]]
+        if not samples:
+            return target, "indexed-target"
     if not samples:
         return target, "no-samples"
     near_stable = [s for s in samples
@@ -534,7 +538,7 @@ def _grab(page, out_path: str):
     return _frame_usable(out_path)
 
 
-def _shoot(page, sec, name, imgdir, urls) -> ShotResult:
+def _shoot(page, sec, name, imgdir, urls, bounds=None) -> ShotResult:
     """D+E+G+F 层：embed 优先/主站兜底；越界与 seek 校验；稳定帧挑选；元素截图；空帧重拍。
 
     任何一步不合格都返回 ok=False **且不留下图片文件** —— 错图比缺图更糟：
@@ -587,7 +591,7 @@ def _shoot(page, sec, name, imgdir, urls) -> ShotResult:
     else:
         print("  G: 采样失败，按目标时刻截图" + (f"（{smp.get('reason')}）"
                                                  if smp.get("reason") else ""))
-    pick, how = _pick_stable(samples, sec)
+    pick, how = _pick_stable(samples, sec, bounds)
     r.picked, r.how = pick, how
     if samples:
         best = max(samples, key=lambda s: s["ink"])
@@ -599,6 +603,9 @@ def _shoot(page, sec, name, imgdir, urls) -> ShotResult:
         r.reason = f"回跳到选定时刻 {pick:.1f}s 失败：{info.get('reason') or '未知'}"
         return r
     r.actual = float(info.get("actual") or 0.0)
+    if bounds is not None and not (bounds[0] <= r.actual < bounds[1]):
+        r.reason = "播放器实际停点越过索引画面边界，需重新选择时间点"
+        return r
 
     # 先拍进 .partial.png：只有验合格才 os.replace 成正式图，
     # 这样误判/失败都不会破坏 images/ 里可能已经存在的同名图。
@@ -616,12 +623,20 @@ def _shoot(page, sec, name, imgdir, urls) -> ShotResult:
             return r
         print(f"  QA: {why}，偏移 +2s 重拍一次")
         retry = pick + 2.0
+        if bounds is not None and not (bounds[0] <= retry < bounds[1]):
+            _unlink(tmp)
+            r.reason = f"空帧/黑帧：{why}（偏移重拍会越过索引画面边界，需人工换时间点）"
+            return r
         if r.duration:                       # 别夹出片外（否则等于重拍同一张）
             retry = min(retry, max(0.0, r.duration - 0.5))
         info2 = page.evaluate(SEEK_JS, retry)
         if info2.get("ok"):
             r.retried = True
             r.picked, r.actual = retry, float(info2.get("actual") or 0.0)
+            if bounds is not None and not (bounds[0] <= r.actual < bounds[1]):
+                _unlink(tmp)
+                r.reason = "重拍实际停点越过索引画面边界，需重新选择时间点"
+                return r
             ok, why = _grab(page, tmp)       # 重拍后必须重新验，不能想当然
         else:
             ok, why = False, "重拍 seek 失败：" + (info2.get("reason") or "未知")
@@ -634,6 +649,21 @@ def _shoot(page, sec, name, imgdir, urls) -> ShotResult:
     r.ok = True
     print(f"saved {name}.png  实际 {r.actual:.1f}s" + ("（已重拍）" if r.retried else ""))
     return r
+
+
+def indexed_bounds(imgdir, video_id):
+    """仅用匹配当前视频的完整目录约束截图，不依赖 overview 是否展示。"""
+    path = os.path.join(os.path.dirname(imgdir), "sprite_index.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            index = json.load(f)
+        if index.get("video_id") != video_id:
+            return []
+        return [(float(c["since"]), float(c["until"]))
+                for c in index.get("candidates", [])
+                if float(c["since"]) < float(c["until"])]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
 
 
 def _run_capture(p, shots, imgdir, profile_dir, video_id, platform, headless) -> List[ShotResult]:
@@ -652,9 +682,11 @@ def _run_capture(p, shots, imgdir, profile_dir, video_id, platform, headless) ->
                 print(f">> native stream size: {dims[0]}x{dims[1]} (viewport 1:1)")
                 page.set_viewport_size({"width": dims[0], "height": dims[1]})
         results: List[ShotResult] = []
+        intervals = indexed_bounds(imgdir, video_id)
         for sec, name, embed, main in shots:
             try:
-                results.append(_shoot(page, sec, name, imgdir, [embed, main]))
+                bounds = next((b for b in intervals if b[0] <= sec < b[1]), None)
+                results.append(_shoot(page, sec, name, imgdir, [embed, main], bounds))
             except Exception as e:
                 # 单帧的任何异常（元素消失 / 跨域污染 / 页面里冒出第二个 <video> ……）
                 # 只作废这一帧，不能报废整轮（旧版异常会穿出去，整轮只剩半截图）
@@ -815,7 +847,7 @@ def main() -> None:
     imgdir = os.path.join(vdir, "images")
     os.makedirs(imgdir, exist_ok=True)
 
-    source_md = tagged if os.path.exists(tagged) else book
+    source_md = current_source(book, tagged)
     if not os.path.exists(source_md):
         sys.exit("no book markdown found: " + source_md)
     timestamps = parse_timestamps(source_md)

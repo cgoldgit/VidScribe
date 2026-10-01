@@ -27,6 +27,9 @@ python -m pytest tests
 | `test_capture_frames.py` | ffmpeg | 截图质量检查、选帧、占位符、重截参数、失败门禁和 manifest |
 | `test_capture_browser.py` | 本机 Chrome；缺少时跳过 | 媒体超时、播放停滞、真实浏览器截图、越界与空帧处理 |
 | `test_sprite_index.py` | ffmpeg | 变化点筛选、张数上限、时间戳、缓存、原子下载和平台判断 |
+| `test_extract_frames.py` | ffmpeg | 当前稿优先、物化计数与对照稿同步、失败抽帧保留旧图 |
+| `test_note_plan.py` | 无；全离线 | 原句完整分包、边界上下文、来源 SHA、概览外候选与审阅记录保护 |
+| `test_note_audit.py` | ffmpeg、av、numpy | 来源去向、图片需求门禁、时间检查与近重复报告 |
 | `test_asr_transcript.py` | 无；全离线 | 多分P URL、试跑隔离、断点续跑和 `--restart` |
 | `test_timecode.py` | 无 | 字幕时间戳归一化和覆盖率计算 |
 | `test_transcript_quality.py` | 无；全离线 | 覆盖率门槛、批量门禁、坏文件重抓和不覆盖已有产物 |
@@ -49,6 +52,7 @@ python -m pytest tests
 - `capture_frames.py` 主入口在部分帧失败时的完整命令行输出。
 - 真实 Git 仓库中的 pages 发布、幂等更新和目录改名保护。
 - 浏览器实拍产生的 `capture_manifest.json`。
+- 原例子、推导和操作的语义保留，关键画面召回、语义重复与 CC 模型实际 token usage。
 
 HTML 的 CSP 当前仍包含 `'unsafe-inline'`。现有测试验证外部来源限制和已知注入路径，但不能把该配置视为完整的内联脚本防护。
 

@@ -25,7 +25,7 @@ venv.bak/
 # AI 助手工作文件（本机使用，不提交）
 memory/
 .claude/settings.local.json
-CLAUDE.md
+CLAUDE.local.md
 
 # dedicated Chrome capture profile (cookies, large)
 .capture-profile/
