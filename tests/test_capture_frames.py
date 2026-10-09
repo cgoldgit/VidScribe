@@ -34,6 +34,35 @@ def test_fmt_ts_is_hh_mm_ss():
     assert cf.fmt_ts(9.6) == "00:00:10"      # 四舍五入到秒
 
 
+def test_experiment_draft_materialization_preserves_the_formal_book():
+    with tempfile.TemporaryDirectory() as tmp:
+        from pathlib import Path
+        root = Path(tmp)
+        original = root / 'book.md'
+        original.write_text('Original notes', encoding='utf-8')
+        book, tagged = cf.draft_paths(tmp, 'book.assembled.md')
+        Path(book).write_text('![diagram](SCREENSHOT:00:00:08)', encoding='utf-8')
+        images = root / 'images'
+        images.mkdir()
+        write_png(str(images / 'shot_00_00_08.png'), still_image())
+        cf.materialize(book, tagged, str(images))
+        assert original.read_text(encoding='utf-8') == 'Original notes'
+        assert not (root / 'book.tagged.md').exists()
+        assert Path(tagged).name == 'book.assembled.tagged.md'
+        assert 'images/shot_00_00_08.png' in Path(book).read_text(encoding='utf-8')
+
+
+def test_experiment_draft_path_must_stay_inside_video_directory():
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ['../book.md', '..\\book.md', 'C:\\book.md', '/book.md', 'notes.txt']:
+            try:
+                cf.draft_paths(tmp, name)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Unsafe draft path accepted')
+
+
 def test_parse_timestamps_ignores_bad_and_keeps_hms():
     d = _tmpdir()
     try:

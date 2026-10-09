@@ -1,6 +1,6 @@
 """为 CC 生成完整的文本阅读包；不调用模型，不把分包当作语义章节。
 
-python src/note_plan.py <video_id> [--out VIDEO_DIR] [--force]
+python src/note_plan.py <video_id> [--out VIDEO_DIR] [--detail lean|compact|full] [--force]
 生成 note_plan.summary.md、note_plan.json、note_packets/P*.md、note_review.template.json。
 agent 优先读 summary，再按路径读包；完整 JSON 供本地审计。
 note_review.json 由 agent 填写，本工具永不覆盖它。
@@ -89,7 +89,8 @@ def _chapter_at(seconds, chapters):
     return current
 
 
-def _visual_candidates(sprite, start, end, warnings):
+def _visual_catalog(sprite, warnings):
+    """Normalize the complete index once, before selecting each packet's interval."""
     result = []
     if not sprite:
         return result
@@ -114,8 +115,7 @@ def _visual_candidates(sprite, start, end, warnings):
                      "until": until, "weak": bool(cell.get("weak", False)),
                      "merged": cell.get("merged", 0)}
             visible[timestamp] = entry
-            if until >= start and since <= end:
-                result.append(entry)
+            result.append(entry)
     # schema 2 的完整目录含概览预算之外的候选，不能仅从 sheets 制作正文包。
     candidates = sprite.get("candidates")
     if isinstance(candidates, list) and candidates:
@@ -129,17 +129,25 @@ def _visual_candidates(sprite, start, end, warnings):
                 until = timecode.parse_seconds(candidate.get("until", timestamp))
             except ValueError:
                 continue
-            if until < start or since > end:
-                continue
             result.append({"id": candidate.get("id", ""),
                            "time": timecode.format_hms(timestamp), "since": since,
                            "until": until, "weak": bool(candidate.get("weak", False)),
                            "overview_visible": timestamp in visible,
                            "sheet": visible.get(timestamp, {}).get("sheet", ""),
                            "pos": visible.get(timestamp, {}).get("pos")})
-        if any(not entry["overview_visible"] for entry in result):
-            warnings.append("部分候选未展示在概览；按需求局部细查，不能把概览当成完整视觉覆盖。")
     return result
+
+
+def _select_visual_candidates(catalog, start, end, warnings):
+    # Keep catalog order and inclusive overlap, including old/unsorted indexes.
+    result = [dict(entry) for entry in catalog if entry["until"] >= start and entry["since"] <= end]
+    if any(entry.get("overview_visible") is False for entry in result):
+        warnings.append("部分候选未展示在概览；按需求局部细查，不能把概览当成完整视觉覆盖。")
+    return result
+
+
+def _visual_candidates(sprite, start, end, warnings):
+    return _select_visual_candidates(_visual_catalog(sprite, warnings), start, end, warnings)
 
 
 def build_plan(transcript, sprite=None, *, max_chars=6000, max_seconds=480,
@@ -179,6 +187,7 @@ def build_plan(transcript, sprite=None, *, max_chars=6000, max_seconds=480,
             warnings.append(f'{segment["id"]} 单句超过分包上限，完整保留，未截断。')
     groups.append((first, len(segments), chapter[1]))
     packets = []
+    catalog = _visual_catalog(sprite, warnings)
     for number, (first, stop, title) in enumerate(groups, 1):
         body = segments[first:stop]
         start, end = body[0]["start"], max(s["end"] for s in body)
@@ -192,7 +201,7 @@ def build_plan(transcript, sprite=None, *, max_chars=6000, max_seconds=480,
             "teaching_cues": [{"segment": s["id"], "kinds": kinds} for s in body
                               if (kinds := [kind for kind, regex in CUES.items()
                                             if regex.search(s["text"])])],
-            "visual_candidates": _visual_candidates(sprite, start, end, warnings),
+            "visual_candidates": _select_visual_candidates(catalog, start, end, warnings),
         })
     if not sprite:
         warnings.append("无画面索引：候选时间来自字幕时须进一步核图，不能声明已检查全片画面。")
@@ -205,11 +214,13 @@ def build_plan(transcript, sprite=None, *, max_chars=6000, max_seconds=480,
         "settings": {"max_chars": max_chars, "max_seconds": max_seconds,
                      "context_segments": context_segments},
         "segment_count": len(segments), "packets": packets,
+        "segment_times": {s["id"]: {"start": s["start"], "end": s["end"]}
+                          for s in segments},
         "warnings": list(dict.fromkeys(warnings)),
     }
 
 
-def render_packet(packet, segments):
+def _render_full_packet(packet, segments):
     lookup = {s["id"]: s for s in segments}
     lines = [f'# {packet["id"]}: {packet["start"]}–{packet["end"]}', "",
              "这是阅读分包，不是最终章节。按原讲解顺序轻度整理，先读文字，按视觉需求核图。",
@@ -242,11 +253,67 @@ def render_packet(packet, segments):
     return "\n".join(lines)
 
 
+def _table_cell(value):
+    """定位字段可以来自外部索引，不能破坏 Markdown 表格。"""
+    return str(value).replace("|", "&#124;").replace("\r", " ").replace("\n", " ")
+
+
+def _tsv_cell(value):
+    return str(value).replace("\\", "\\\\").replace("\t", "\\t").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def render_packet(packet, segments, *, detail="compact"):
+    """默认只给模型正文和定位必需字段；完整机器元数据留在 manifest。"""
+    if detail not in ("lean", "compact", "full"):
+        raise ValueError("detail 必须是 lean、compact 或 full")
+    if detail == "full":
+        return _render_full_packet(packet, segments)
+    lookup = {s["id"]: s for s in segments}
+    lines = [f'# {packet["id"]}: {packet["start"]}–{packet["end"]}', "",
+             f'官方章节参考：{packet["chapter_hint"] or "无"}', ""]
+    for heading, key in [("前文上下文（只读）", "context_before"),
+                         ("本包完整字幕", "source_segments"),
+                         ("后文上下文（只读）", "context_after")]:
+        lines.extend([f"## {heading}", ""])
+        for identifier in packet[key]:
+            item = lookup[identifier]
+            # 不 strip / 拼句 / 截断：原句文本，包括内嵌换行，逐字保留。
+            lines.append(f'[{identifier}@{timecode.format_hms(item["start"])}] {item["text"]}')
+        lines.append("")
+    lines.extend(["## 候选画面（尚未核图）", ""])
+    if detail == "lean":
+        lines.extend([r"字段与 compact 相同，制表符分隔；\t/\r/\n/\\ 表示字段内的转义字符。",
+                      "```tsv", "id\ttime\tsince\tuntil\tweak\toverview_visible\tsheet\tpos"])
+    else:
+        lines.extend(["| id | time | since | until | weak | overview_visible | sheet | pos |",
+                      "|---|---|---|---|---|---|---|---|"])
+    for candidate in packet["visual_candidates"]:
+        time = candidate["time"]
+        # 旧版索引没有 candidate id，用时间生成稳定定位键，不改变原 manifest。
+        identifier = candidate.get("id") or "time_" + time.replace(":", "_")
+        visible = candidate.get("overview_visible", bool(candidate.get("sheet")))
+        fields = [identifier, time, timecode.format_hms(candidate["since"]),
+                  timecode.format_hms(candidate["until"]),
+                  int(bool(candidate.get("weak"))), int(bool(visible)),
+                  candidate.get("sheet") or "-",
+                  candidate["pos"] if candidate.get("pos") is not None else "-"]
+        if detail == "lean":
+            lines.append("\t".join(_tsv_cell(value) for value in fields))
+        else:
+            lines.append("| " + " | ".join(_table_cell(value) for value in fields) + " |")
+    if detail == "lean":
+        lines.append("```")
+    if not packet["visual_candidates"]:
+        lines.append("无候选；需要配图时按字幕时间进一步定位。")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_summary(plan):
     """agent 的轻量阅读入口；避免整读 manifest 后在包里重复读同样元数据。"""
     lines = ["# 笔记阅读包入口", "",
              "先按下表路径顺序读取文本包，再按包内候选定位必要画面。",
-             "完整 note_plan.json 供审计工具使用，包含的逐句 ID 与候选元数据已在包内提供。",
+             "完整 note_plan.json 留给本地程序：保留句子归属、起止时间、关键词线索和完整候选元数据。",
              "分包控制单次上下文大小；边界上下文和审阅记录仍有成本，不能保证总 token 下降。", "",
              f'字幕 SHA256：`{plan["source_sha256"]}`',
              f'图册 SHA256：`{plan.get("sprite_sha256") or "无"}`', "",
@@ -262,7 +329,21 @@ def render_summary(plan):
     lines.extend(f"- {warning}" for warning in plan["warnings"])
     if not plan["warnings"]:
         lines.append("未发现分包输入异常；这不证明语义完整或没有漏图。")
-    lines.extend(["", "首次写作复制 note_review.template.json 后编辑 note_review.json；已有审阅记录时继续编辑。", ""])
+    lines.extend(["", "## 阅读与交稿规则（适用于全部包）", "",
+                  "- 默认紧凑包以 [句子ID@开始时间] 标记原句，原文完整保留；结束时间在 manifest 的 segment_times。",
+                  "- source_segments 是本包负责的原句；前后文只用于理解，不重复写入。阅读包不等于最终章节。",
+                  "- 沿讲解顺序保留例子的条件、推导步骤、操作输入与结果；同一例子跨包时继续写完。",
+                  "- 关键词线索仅存在于 manifest，可能误报或漏报；须读全部原句，不按线索筛掉内容。",
+                  "- 候选表 weak/overview_visible 的 1/0 表示是/否，sheet 与 pos 定位概览；- 表示未展示或不可定位。",
+                  "- 完整候选的 merged 等附加字段留在 manifest；涉及步骤变化时按候选时间局部细查，不能只看代表图。",
+                  "- 先记录视觉用途，再核相关索引与必要高清帧；候选表不是看过画面的证据。",
+                  "- 每句记录 written/omitted 去向；同用途的连续句可记录范围，由本地工具展开核验，不让模型逐个枚举 ID。",
+                  "- 不明确的名称、数值或代码记入待核项；visual_requests 记录 time/status/reason/section。",
+                  "- 空视觉需求清单不能证明无遗漏；核图未完成保留 pending，并说明检查范围。",
+                  "- 首次写作复制 note_review.template.json 后编辑 note_review.json；已有审阅记录时继续编辑。",
+                  "- --detail full 可恢复完整包展示；来源和句子归属不因展示模式变化而改变。", ""])
+    if plan.get("packet_detail") == "lean":
+        lines.append("- 当前 lean 模式候选用 TSV，字段与 compact 一致，未展示候选仍完整保留。")
     return "\n".join(lines)
 
 
@@ -290,9 +371,11 @@ def _atomic_text(path, text):
             os.unlink(name)
 
 
-def generate(directory, *, video_id=None, force=False, **settings):
+def generate(directory, *, video_id=None, force=False, detail="compact", **settings):
     """输入变动需显式 --force；已填的 review 始终保留，SHA 用于判定过期。"""
     directory = Path(directory)
+    if detail not in ("lean", "compact", "full"):
+        raise ValueError("detail 必须是 lean、compact 或 full")
     source = (directory / "transcript.json").read_bytes()
     transcript = json.loads(source)
     if video_id and transcript.get("video_id") not in (None, "", video_id):
@@ -304,6 +387,7 @@ def generate(directory, *, video_id=None, force=False, **settings):
     if video_id:
         plan["video_id"] = video_id
     plan["sprite_sha256"] = _digest(sprite_bytes) if sprite_bytes else None
+    plan["packet_detail"] = detail
     plan_path = directory / "note_plan.json"
     if plan_path.exists() and not force:
         old = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -312,7 +396,8 @@ def generate(directory, *, video_id=None, force=False, **settings):
             raise ValueError("输入或分包设置已变动；确认后加 --force 重建，旧 note_review.json 会保留并需重新审核")
     segments = _normalized_segments(transcript)
     # 先完成全部内存渲染，再逐文件原子替换；agent 按 manifest 读取，不按目录通配。
-    packets = [(directory / p["path"], render_packet(p, segments)) for p in plan["packets"]]
+    packets = [(directory / p["path"], render_packet(p, segments, detail=detail))
+               for p in plan["packets"]]
     for path, content in packets:
         _atomic_text(path, content)
     _atomic_text(directory / "note_review.template.json",
@@ -329,6 +414,8 @@ def main(argv=None):
     parser.add_argument("--max-chars", type=int, default=6000, help="单包输入字符预算，不是成品字数")
     parser.add_argument("--max-seconds", type=int, default=480)
     parser.add_argument("--context-segments", type=int, default=2)
+    parser.add_argument("--detail", choices=("lean", "compact", "full"), default="compact",
+                        help="阅读包展示密度；完整原句和机器 manifest 始终保留")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     if not args.out and (not re.fullmatch(r"[A-Za-z0-9_-]+", args.video_id)
@@ -337,6 +424,7 @@ def main(argv=None):
     directory = args.out or BASE_DIR / "output" / args.video_id
     try:
         plan = generate(directory, video_id=args.video_id, force=args.force,
+                        detail=args.detail,
                         max_chars=args.max_chars, max_seconds=args.max_seconds,
                         context_segments=args.context_segments)
     except (OSError, ValueError) as exc:

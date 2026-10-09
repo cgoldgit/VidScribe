@@ -1,6 +1,6 @@
 """Local note checks. Structural evidence does not prove semantic completeness.
 
-python src/note_audit.py <video_id> [--out VIDEO_DIR] [--require-review]
+python src/note_audit.py <video_id> [--out VIDEO_DIR] [--require-review] [--require-editorial]
 Never edits the book or removes images. Similarity findings need human/agent review.
 """
 import argparse
@@ -13,6 +13,7 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 import timecode
+import note_editorial
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -23,6 +24,61 @@ for _stream in (sys.stdout, sys.stderr):
 BASE_DIR = Path(__file__).resolve().parents[1]
 IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 SHOT_RE = re.compile(r"shot_(\d{2}_\d{2}_\d{2})\.png$")
+SEGMENT_ID_RE = re.compile(r'S[0-9]{6,}')
+
+
+def normalize_coverage_ids(entry, allowed_ids):
+    """Return bounded, unique source IDs from legacy lists or inclusive ranges.
+
+    Exactly one of ``source_segments`` and ``source_ranges`` is required.
+    ``allowed_ids`` is the current packet's source IDs, not the whole video.
+    Range endpoints and lengths are checked before expanding any interval.
+    This helper does not validate completeness across separate coverage entries.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError('coverage entry must be an object')
+    has_segments, has_ranges = 'source_segments' in entry, 'source_ranges' in entry
+    if has_segments == has_ranges:
+        raise ValueError('provide exactly one of source_segments or source_ranges')
+    allowed = set(allowed_ids)
+    if has_segments:
+        covered = entry['source_segments']
+        if (not isinstance(covered, list) or not covered
+                or any(not isinstance(s, str) for s in covered)):
+            raise ValueError('source_segments must be a nonempty list of IDs')
+        if len(covered) > len(allowed) or len(set(covered)) != len(covered):
+            raise ValueError('duplicate or excessive source segments')
+        if set(covered) - allowed:
+            raise ValueError('source segment outside current packet')
+        return list(covered)
+    ranges = entry['source_ranges']
+    if not isinstance(ranges, list) or not ranges:
+        raise ValueError('source_ranges must be a nonempty list of ID pairs')
+    covered, seen = [], set()
+    for pair in ranges:
+        if (not isinstance(pair, list) or len(pair) != 2
+                or any(not isinstance(s, str) or not SEGMENT_ID_RE.fullmatch(s) for s in pair)):
+            raise ValueError('each source range must contain two S-prefixed IDs')
+        start, end = pair
+        # Check membership before parsing integers: unknown arbitrarily long IDs
+        # and endpoints outside this packet cannot trigger expensive expansion.
+        if start not in allowed or end not in allowed:
+            raise ValueError('source range endpoint outside current packet')
+        first, last = int(start[1:]), int(end[1:])
+        count = last - first + 1
+        if count <= 0:
+            raise ValueError('source range is reversed')
+        if count > len(allowed) or len(covered) + count > len(allowed):
+            raise ValueError('source ranges exceed current packet size')
+        for number in range(first, last + 1):
+            segment_id = f'S{number:06d}'
+            if segment_id not in allowed:
+                raise ValueError('source range includes IDs outside current packet')
+            if segment_id in seen:
+                raise ValueError('source ranges overlap')
+            seen.add(segment_id)
+            covered.append(segment_id)
+    return covered
 
 
 def _atomic_json(path, data):
@@ -47,7 +103,8 @@ def _fingerprint(path):
             small[:78].astype(np.int16))
 
 
-def audit_directory(vdir, require_review=False, check_similarity=True):
+def audit_directory(vdir, require_review=False, check_similarity=True, *,
+                    book_name='book.md', review_name='note_review.json', require_editorial=False):
     vdir = Path(vdir).resolve()
     errors, warnings = [], []
     report = {'schema_version': 1, 'video_dir': str(vdir), 'errors': errors,
@@ -57,7 +114,11 @@ def audit_directory(vdir, require_review=False, check_similarity=True):
     def issue(dest, code, **details):
         dest.append({'code': code, **details})
 
-    book_path = vdir / 'book.md'
+    for name in (book_name, review_name):
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name)
+                or not (vdir / name).resolve().is_relative_to(vdir)):
+            raise ValueError('Audit inputs must be files inside the video directory')
+    book_path = vdir / book_name
     if not book_path.is_file():
         issue(errors, 'missing_book')
         report['status'] = 'failed'
@@ -158,7 +219,8 @@ def audit_directory(vdir, require_review=False, check_similarity=True):
         issue(warnings, 'similar_images_need_review', pairs=len(report['similar_images']),
               reason='Small text/formula changes can be meaningful; do not remove automatically.')
 
-    plan_path, review_path = vdir / 'note_plan.json', vdir / 'note_review.json'
+    plan_path, review_path = vdir / 'note_plan.json', vdir / review_name
+    review = None
     if not plan_path.is_file() or not review_path.is_file():
         issue(errors if require_review else warnings, 'missing_plan_or_review')
     else:
@@ -175,6 +237,10 @@ def audit_directory(vdir, require_review=False, check_similarity=True):
             report['review_checked'] = True
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             issue(errors, 'invalid_plan_or_review', reason=type(exc).__name__)
+    editorial = note_editorial.check_editorial(content, review, required=require_editorial)
+    errors.extend(editorial['errors'])
+    warnings.extend(editorial['warnings'])
+    report['editorial'] = {key: value for key, value in editorial.items() if key not in ('errors', 'warnings')}
     report['status'] = 'failed' if errors else ('needs_review' if warnings else 'checks_passed')
     return report
 
@@ -209,12 +275,12 @@ def _check_review(plan, review, transcript_path, headings, times, duration, erro
         if packet_id not in expected:
             fail('unknown_packet', packet_id=packet_id)
             continue
-        covered = entry.get('source_segments')
-        if not isinstance(covered, list) or not covered or any(not isinstance(s, str) for s in covered):
-            fail('review_segment_mismatch', packet_id=packet_id)
+        try:
+            covered = normalize_coverage_ids(entry, expected[packet_id])
+        except ValueError as exc:
+            fail('review_segment_mismatch', packet_id=packet_id, reason=str(exc))
             continue
-        if (len(set(covered)) != len(covered) or set(covered) - set(expected[packet_id])
-                or seen[packet_id].intersection(covered)):
+        if seen[packet_id].intersection(covered):
             fail('review_segment_mismatch', packet_id=packet_id)
         seen[packet_id].update(covered)
         status = entry.get('status')
@@ -263,14 +329,19 @@ def main(argv=None):
     parser.add_argument('video_id')
     parser.add_argument('--out', type=Path, help='Existing video directory to inspect')
     parser.add_argument('--require-review', action='store_true')
+    parser.add_argument('--require-editorial', action='store_true', help='Require chapter summaries and factual review evidence')
     parser.add_argument('--no-similarity', action='store_true', help='Skip decoded image comparison')
     parser.add_argument('--report', type=Path, help='Save JSON here instead of VIDEO_DIR/note_audit.json')
+    parser.add_argument('--book-name', default='book.md', help='Audit this draft without replacing book.md')
+    parser.add_argument('--review-name', default='note_review.json', help='Corresponding review filename')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_-]+', args.video_id):
         parser.error('video_id must contain only letters, digits, underscores and hyphens')
     vdir = args.out or BASE_DIR / 'output' / args.video_id
     try:
-        report = audit_directory(vdir, args.require_review, not args.no_similarity)
+        report = audit_directory(vdir, args.require_review, not args.no_similarity,
+                                 book_name=args.book_name, review_name=args.review_name,
+                                 require_editorial=args.require_editorial)
         destination = args.report or vdir / 'note_audit.json'
         destination.parent.mkdir(parents=True, exist_ok=True)
         _atomic_json(destination, report)

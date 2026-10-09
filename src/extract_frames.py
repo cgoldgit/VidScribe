@@ -24,7 +24,9 @@ The downloaded video source is a fallback-only media file. It stays on disk
 after extraction so failed frames can be retried; at the end of the whole
 workflow the agent asks the user whether to delete such large media files.
 """
+import argparse
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -35,6 +37,18 @@ import timecode
 
 PLACEHOLDER = re.compile(r'!\[([^\]]*)\]\(SCREENSHOT:(\d{2}:\d{2}:\d{2})(?:\.\d+)?\)')
 IMAGE_TIMESTAMP = re.compile(r'!\[[^\]]*\]\((?:\./)?images/shot_(\d{2})_(\d{2})_(\d{2})\.png\)')
+
+
+def draft_paths(vdir, book_name='book.md'):
+    """Select one contained draft and its own tagged copy, including experiments."""
+    root = Path(vdir).resolve()
+    if not isinstance(book_name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.md', book_name):
+        raise ValueError('book-name must be a Markdown filename inside the video directory')
+    book = (root / book_name).resolve()
+    tagged = (root / (Path(book_name).stem + '.tagged.md')).resolve()
+    if not book.is_relative_to(root) or not tagged.is_relative_to(root):
+        raise ValueError('Draft or tagged file escapes the video directory')
+    return str(book), str(tagged)
 
 
 def current_source(book: str, tagged: str) -> str:
@@ -119,17 +133,22 @@ def materialize(book: str, tagged: str, imgdir: str) -> None:
 
 
 def main() -> None:
-    video_id = sys.argv[1] if len(sys.argv) > 1 else "BV1pb8o6yE8f"
-    video_url = sys.argv[2] if len(sys.argv) > 2 else None
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('video_id', nargs='?', default='BV1pb8o6yE8f')
+    parser.add_argument('video_url', nargs='?', default=None)
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--book-name', default='book.md')
+    args = parser.parse_args()
+    video_id, video_url = args.video_id, args.video_url
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    vdir = os.path.join(base, "output", video_id)
-    book = os.path.join(vdir, "book.md")
-    tagged = os.path.join(vdir, "book.tagged.md")
+    vdir = str(args.out.resolve()) if args.out else os.path.join(base, "output", video_id)
+    try:
+        book, tagged = draft_paths(vdir, args.book_name)
+    except ValueError as exc:
+        parser.error(str(exc))
     src = os.path.join(vdir, "video_source.mp4")
     imgdir = os.path.join(vdir, "images")
     os.makedirs(imgdir, exist_ok=True)
-
-    ensure_source(src, video_url)
 
     source_md = current_source(book, tagged)
     with open(source_md, encoding="utf-8") as f:
@@ -137,6 +156,8 @@ def main() -> None:
     timestamps = requested_timestamps(content)
     if not timestamps:
         sys.exit("no SCREENSHOT placeholders found in " + source_md)
+
+    ensure_source(src, video_url)
 
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     for ts in timestamps:

@@ -9,7 +9,7 @@ VidScribe 将 YouTube 或 Bilibili 视频转换为结构化的 Markdown 电子�
 - Python 脚本负责字幕提取、画面索引、截图、文件物化、HTML 渲染、合集合并和发布。
 - AI 助手读取字幕与画面信息，按照 `prompts/` 中的规则完成内容重构和截图时间选择。
 
-项目不提供完全独立于 AI 助手的一键生成器。处理视频时由 AI 助手遵循 `instructions.md` 编排各个脚本。
+项目不提供完全独立于 AI 助手的一键生成器。处理视频时由 AI 助手遵循 `instructions.md` 编排各个脚本。B 平衡流程的 `note_workflow.py` 负责独立任务契约、本地合稿、视觉确认复用和受限次数的 CC print 调用；只有 `run-one` 启动模型，使用本机已有 CC 配置。可选结构化文字返回由 `note_results.py` 约束并补齐来源常量，标准任务可编译成公共规则加完整材料，全部验收条件仍保留；`note_candidates.py` 保存字段合格的候选，覆盖、事实记录和小结结构检查通过后才写主草稿，失败候选可局部修复后本地重新检查。`note_job_lock.py` 防止同一任务重复调用与并发写入。`note_cache.py` 复用已对照来源验收的文字包，包内容、邻包、时间、规则变化都会失效。`note_usage.py` 统计各任务成功与失败尝试，复用和本地恢复独立计数，未知用量不记成零。完整用法见 `docs/balanced_workflow.md`。
 
 ## 系统边界
 
@@ -106,6 +106,7 @@ ASR 还可能生成 `_asr_prompt.txt`、`_asr_progress.jsonl`、`_info.json`、`
 | `src/make_corrected.py` | 生成保留原始顺序的修正版字幕对照稿 |
 | `src/note_plan.py` | 生成完整文本包、来源 ID、关键词线索与审阅模板，不调用模型 |
 | `src/note_audit.py` | 检查成品引用、时间、来源审阅与图片相似风险，不改正文、不自动删图 |
+| `src/note_benchmark.py` | 不调用模型，测量完整阅读包、独立写作规则的字符/可选分词数及本地分包时间；源视频目录只读 |
 
 ### 画面选择与截图
 
@@ -128,6 +129,7 @@ ASR 还可能生成 `_asr_prompt.txt`、`_asr_progress.jsonl`、`_info.json`、`
 | 文件 | 职责 |
 | --- | --- |
 | `prompts/stitcher_system.md` | 单视频正文结构、语言、公式、图表和截图占位符规范 |
+| `prompts/writer_system.md` | 独立写作任务的正文和证据规则，省去全片控制步骤；随任务 SHA 校验 |
 | `prompts/episode_section.md` | 多分P 单集的篇幅、标题层级和上下文约束 |
 | `books.json` | 多分P 合并的临时输入；仓库默认不提供，按任务生成且不纳入版本控制 |
 

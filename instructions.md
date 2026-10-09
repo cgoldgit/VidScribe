@@ -99,15 +99,43 @@ YouTube 没有对应的预览图册接口，跳过本命令。
 
 默认采用课堂实录式笔记：沿原讲解顺序清理口癖，保留例子、推导、演示过程、纠错和结果。用户指定其他风格时采用用户要求。成本控制采用文字先读、相关画面按需核查；不以固定字数或图片张数判断完成。
 
+同时进行轻量编辑：每个实际大章节末增加 **本章小结**，2—4 句具体结论与适用条件或易错点；跨包章节只在真实末尾汇总。省略无教学意义的广告、赞助宣传、优惠和关注入群导流，coverage 记 `omitted` 并说明广告原因；广告中有知识讲解时保留知识部分。教学工具名、中性比较和必要操作不能机械删除。
+
+将识别错误与讲师知识错误分开处理：识别错误结合上下文和画面还原；知识错误只有适用的官方资料、具体计算或实际执行证据支持才修正，在该段写 **勘误**，说明原说法、修正和条件并附证据。无法证实的疑点写 **待核实**，不凭模型记忆改成确定结论。故意的错误演示与反例保留错误、原因和修复链；意见与简化解释补清适用条件。
+
 先生成完整文本阅读包，不调用模型：
 
 ```bash
 python src/note_plan.py <video_id>
 ```
 
-读取 `prompts/stitcher_system.md`、轻量入口 `note_plan.summary.md`，然后按清单顺序逐包读取 `note_packets/P*.md`。完整 `note_plan.json` 留给程序核验，避免入口阶段重复读取所有原句 ID 和候选元数据。每句有稳定 ID，前后文单独标记；按清单读取，避免读取旧包。分包按字符、时长和平台章节控制输入大小，agent 仍需识别跨包的同一例子或推导。
+默认执行 B 平衡流程，详细步骤与任务文件契约见 [balanced_workflow.md](docs/balanced_workflow.md)。主 agent 读取 `note_plan.summary.md` 和状态摘要，各独立写作任务读取自己的完整阅读包及写作规则。主会话不通读全片字幕、收集全片图片或二次输出所有草稿。紧凑包保留每句原文、稳定 ID、开始时间和候选定位；完整结束时间、关键词线索与元数据留给本地程序。边界上下文帮助接续同一例子，不重复写入。
 
-首次从 `note_review.template.json` 复制 `note_review.json`，已有记录则继续编辑。记录每句写入的标题或省略理由，以及每个视觉需求的时间、用途、状态和标题。填写 `visual_review` 与 `visual_review_reason`，未检查画面不能把空需求清单当作无漏图证明。来源 SHA 变化时旧审阅作废；`note_plan.py --force` 重建阅读包但保留旧审阅，需重新核对。
+生成独立任务：
+
+```bash
+python src/note_workflow.py prepare <video_id>
+```
+
+按 `note_jobs.json` 的任务清单处理 `jobs/<P>/task.md`，每个任务使用新上下文。已有任务说明优先，不重新启动全片流程。可以显式运行下面的单包命令，使用当前 CC 配置的模型；该命令才会产生模型费用：
+
+```bash
+python src/note_workflow.py run-one <video_id> --job jobs/P001
+```
+
+不要添加 resume/continue，不将主会话历史带给任务，不在任务内再开 agent。默认每任务最多 8 轮、至多 2 次尝试，没有自动重试。失败后先处理异常；已有输出需检查，不凭成功退出码重跑或宣布验收通过。也可以由外部助手在独立上下文按 task.md 手工完成两个输出文件。
+
+每包写 `draft.md` 和 `review.json`，审阅采用 `source_ranges` 记录原句去向，由程序展开。用稳定 `section_id` 指向草稿标题；模型只解释省略或疑问，不枚举全部 ID。旧 `source_segments` 格式仍可审计。每句恰好有一个去向，跨包未完的例子记入 `boundary_notes`；术语不明保留原词，不能先通读全片再猜一张统一术语表。已有且确认过的课程术语可放在 `TERMS.confirmed.md` 复用。
+
+新任务还填写 `fact_review`、`fact_review_reason` 和 `corrections`，字段示例见 B 流程文档。受限写作任务只有本地读取、写入工具，外部资料查证交给控制 agent，只核查标出的疑点；更新对应 draft 和审阅后再合稿。已证实更正记录证据，未解决项记录原因并在正文标 **待核实**；完成这些处理后才记 `fact_review: complete`，该状态不是正确性证明。明显同音字修复不必逐词创建记录，但改变结论的识别歧义须留记录。不要为事实审阅重新查证全片或二次写整本笔记。
+
+完成写作后本地合稿：
+
+```bash
+python src/note_workflow.py assemble <video_id>
+```
+
+输出 `book.assembled.md`、`note_review.assembled.json` 和 `assembly_summary.md`。程序处理覆盖、标题映射和编号；主 agent 只核边界段、待核项和例子的连贯性，按问题做局部补丁。不要二次生成全文。程序不会自动替换正式 `book.md`。来源、术语、写作规则或包内容变化后，旧任务需重新检查，使用独立实验目录重建。
 
 有配图需求时读取相关索引图。`sprite_index.json` 的 `candidates` 保存所有检测到的变化段元数据，`omitted_candidates` 指出概览未展示的候选；默认两张概览只限制展示预算。需要细查时运行：
 
@@ -117,7 +145,7 @@ python src/sprite_index.py <video_id> --start 00:51:00 --end 00:55:40 --all-cell
 
 局部索引另存到 `visual_detail/<起秒>_<止秒>/`，不会覆盖根目录概览。只查看当前需求涉及的索引和必要高清帧，记录已确认的画面用途，后续通过时间和文件引用复用。预览采样之间的短暂画面仍可能缺失；没有索引的 YouTube 视频先由字幕提出需求，再截候选帧确认，不得凭字幕声称看过画面。
 
-按照写作规范将正文写入：
+按照写作规范生成草稿，验收通过后替换正式文件：
 
 ```text
 output/<video_id>/book.md
@@ -125,7 +153,9 @@ output/<video_id>/book.md
 
 需要配图的位置使用 `SCREENSHOT:HH:MM:SS` 占位符。正文参考时间也使用 `HH:MM:SS`，例如 `*(参考时间: 00:51:25)*`。Bilibili 的截图时间优先取自画面索引；索引图只用于定位，不能替代最终高清截图。逐包核查正文是否保留原例子的条件、步骤和结果；小结不能替代这些内容。
 
-使用多个 agent 时由主 agent 管理目录、术语、审阅合并和完成检查；子 agent 只读分配的阅读包和候选画面，各写独立草稿，由主 agent 合稿。并行数量按任务需要控制，避免每个 agent 重复读取完整字幕和所有图片。项目不自动调用或配置模型供应商。
+图片核查也使用独立任务：先对实验稿截取候选帧，再运行 `note_workflow.py visual`，每批默认 4 张，按 `visual_jobs.json` 执行相关 task.md，最后 `apply-visual` 回填确认。确认只回传用途、可见事实和异常，主会话不读取全部图片。`visual_confirmations.json` 按来源、索引、图片 SHA 与用途复用；改变截图或用途须重审。空需求清单不能证明无视觉遗漏，未审阅的包继续阻塞完成。
+
+只有 `note_workflow.py run-one` 会自动调用本机 CC，使用其已有模型与登录配置，不修改供应商配置。脚本的 `produced` 状态只说明生成了文件，不代表来源或视觉审阅通过。运行 `python src/note_usage.py <video_id>` 汇总失败和成功的实际用量；未知计数如实标记，缓存与非缓存输入分别统计。
 
 #### 字幕对照稿
 
@@ -142,7 +172,7 @@ python src/make_corrected.py <video_id>
 首选项目自带的专用浏览器配置：
 
 ```bash
-python src/capture_frames.py <video_id> "<VIDEO_URL>"
+python src/capture_frames.py <video_id> "<VIDEO_URL>" --book-name book.assembled.md
 ```
 
 首次使用或登录状态失效时执行：
@@ -153,10 +183,12 @@ python src/capture_frames.py --setup-profile
 
 此步骤需要启动本机 Chrome 并访问专用浏览器配置。受限运行环境应先取得完成该操作所需的本机访问权限。
 
+默认 B 流程先截实验稿；`--book-name` 对应的 tagged 副本为 `book.assembled.tagged.md`。旧流程省略此参数仍处理 `book.md`。`--out VIDEO_DIR` 可以处理独立实验目录。截图之后进行独立视觉核查，不把所有帧加入主会话。
+
 成功条件：
 
 - 每个截图时间戳都有对应的 `images/shot_HH_MM_SS.png`。
-- `book.md` 中不再包含 `SCREENSHOT:` 占位符。
+- 选中的稿件中不再包含 `SCREENSHOT:` 占位符。
 - 命令退出码为 0。
 - 当脚本实际执行截图时，`capture_manifest.json` 记录本轮结果；仅复用已有图片时不会重新生成记录。
 
@@ -185,7 +217,7 @@ python src/capture_frames.py <video_id> --materialize-only
 仅在浏览器方案不可用或持续失败时使用下载视频的兜底方案：
 
 ```bash
-python src/extract_frames.py <video_id> "<VIDEO_URL>"
+python src/extract_frames.py <video_id> "<VIDEO_URL>" --book-name book.assembled.md
 ```
 
 该方案可能生成 `output/<video_id>/video_source.mp4`，默认画质取决于未登录状态下可获取的视频流。它属于兜底路径，不作为常规截图方式。
@@ -195,12 +227,14 @@ python src/extract_frames.py <video_id> "<VIDEO_URL>"
 先完成 Markdown 质量检查：
 
 ```bash
-python src/note_audit.py <video_id> --require-review
+python src/note_audit.py <video_id> --require-review --require-editorial --book-name book.assembled.md --review-name note_review.assembled.json --report output/<video_id>/note_audit.assembled.json
 ```
 
-产出 `note_audit.json`。错误项（缺图、残留占位符、含糊或越界时间、过期来源、未覆盖原句、未处理图片需求）须修正；相同或近似图片列为警告，逐对检查是否包含新代码、公式或操作状态，再决定合并或保留。工具不会自动删图。`needs_review` 表示仍有警告需复核，退出码 0 仅代表没有结构错误；`checks_passed` 也不能证明语义完整。
+产出独立的 `note_audit.assembled.json`。错误项（缺图、残留占位符、含糊或越界时间、过期来源、未覆盖原句、未处理图片需求）须修正；相同或近似图片列为警告，逐对检查是否包含新代码、公式或操作状态，再决定合并或保留。工具不会自动删图。`needs_review` 表示仍有警告需复核，退出码 0 仅代表没有结构错误；`checks_passed` 也不能证明语义完整。主要例子、边界、歧义与视觉需求完成核查后，由控制 agent 将实验稿及审阅记录作为正式 `book.md`、`note_review.json`，再运行默认审计；已有成品需要保留可恢复副本，不自动覆盖未验收内容。
 
-交付前对照原句抽查主要例子的条件、推导步骤、操作反馈与图片实际内容，特别检查字幕指图但文字未解释清楚的位置。旧笔记缺少来源审阅时，可先运行不带 `--require-review` 的审计识别文件、时间和重复风险，再补计划与审阅。
+新增编辑检查核验章节小结、事实审阅记录、勘误/待核展示与证据字段；广告词仅形成待审线索，不自动删除。`--require-editorial` 用于新任务验收，省略它时旧审阅缺新字段作为兼容警告。即使字段齐全，程序也不能验证来源是否支持修正或判断每条课堂知识真假。
+
+交付前对照原句抽查主要例子的条件、推导步骤、操作反馈与图片实际内容，特别检查字幕指图但文字未解释清楚的位置。复核知识更正的证据适用范围，检查每章小结是否只总结本章已有结论，以及广告线索是否为教学内容；待核项仍须在完成报告说明。旧笔记缺少来源审阅时，可先运行不带 `--require-review`、`--require-editorial` 的审计识别文件、时间和重复风险，再补计划与审阅。
 
 只有用户明确要求 HTML、网页版本、浏览器预览或 GitHub Pages 发布时，才执行下面的渲染命令。默认 Markdown 完成检查后进入完成报告。
 

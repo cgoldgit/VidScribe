@@ -193,7 +193,11 @@ def test_rendered_source_remains_exact_with_milliseconds():
     rendered = note_plan.render_packet(plan["packets"][0], note_plan._normalized_segments(source))
     assert source["segments"][0]["text"] in rendered
     assert source["segments"][1]["text"] in rendered
-    assert "S000001 00:00:00–00:00:09" in rendered
+    assert "[S000001@00:00:00] " + source["segments"][0]["text"] in rendered
+    assert plan["segment_times"]["S000001"] == {"start": 0, "end": 9}
+    full = note_plan.render_packet(plan["packets"][0], note_plan._normalized_segments(source),
+                                   detail="full")
+    assert "S000001 00:00:00–00:00:09" in full
 
 
 def test_summary_lists_all_packets_without_repeating_text_or_segment_ids():
@@ -213,5 +217,111 @@ def test_summary_lists_all_packets_without_repeating_text_or_segment_ids():
         assert "source_count" in summary and "candidate_count" in summary and "unseen_count" in summary
         assert "不能保证总 token 下降" in summary
         rendered = (directory / plan["packets"][0]["path"]).read_text(encoding="utf-8")
-        candidate_json = rendered.split("```json\n", 1)[1].split("\n```", 1)[0]
-        assert json.loads(candidate_json) == plan["packets"][0]["visual_candidates"]
+        assert "```json" not in rendered
+        assert "| id | time | since | until | weak | overview_visible | sheet | pos |" in rendered
+
+
+def test_compact_candidates_keep_unseen_and_legacy_locations():
+    sprite = {"sheets": [{"file": "sprite/sheet_01.png", "cells": [
+        {"pos": 0, "time": "00:00:10", "since": 0, "until": 15}]}],
+        "candidates": [{"id": "candidate_0001", "time": "00:00:10", "since": 0,
+                        "until": 15, "weak": True},
+                       {"id": "candidate_0002", "time": "00:00:25", "since": 15,
+                        "until": 30, "weak": False}]}
+    source = transcript()
+    plan = note_plan.build_plan(source, sprite)
+    packet = plan["packets"][0]
+    rendered = note_plan.render_packet(packet, note_plan._normalized_segments(source))
+    assert "| candidate_0001 | 00:00:10 | 00:00:00 | 00:00:15 | 1 | 1 | sprite/sheet_01.png | 0 |" in rendered
+    assert "| candidate_0002 | 00:00:25 | 00:00:15 | 00:00:30 | 0 | 0 | - | - |" in rendered
+    legacy = note_plan.build_plan(source, {"sheets": sprite["sheets"]})
+    legacy_rendered = note_plan.render_packet(legacy["packets"][0], note_plan._normalized_segments(source))
+    assert "| time_00_00_10 |" in legacy_rendered
+    assert "| 0 | 1 | sprite/sheet_01.png | 0 |" in legacy_rendered
+
+
+def test_full_detail_retains_json_and_compact_keeps_source_exact():
+    source = transcript(["  原文空白不能删除。\n下一行也是原文。", "例如这张图先输入，然后检查。"])
+    plan = note_plan.build_plan(source)
+    normalized = note_plan._normalized_segments(source)
+    packet = plan["packets"][0]
+    compact = note_plan.render_packet(packet, normalized)
+    full = note_plan.render_packet(packet, normalized, detail="full")
+    for segment in source["segments"]:
+        assert segment["text"] in compact and segment["text"] in full
+    assert len(compact) < len(full)
+    assert "## 讲解线索" not in compact and "## 讲解线索" in full
+    candidate_json = full.split("```json\n", 1)[1].split("\n```", 1)[0]
+    assert json.loads(candidate_json) == packet["visual_candidates"]
+    try:
+        note_plan.render_packet(packet, normalized, detail="unknown")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("未知展示模式须拒绝")
+
+
+def test_detail_modes_preserve_source_and_legacy_manifest():
+    with tempfile.TemporaryDirectory(prefix="vs_note_detail_") as temporary:
+        directory = Path(temporary)
+        source = transcript()
+        (directory / "transcript.json").write_text(json.dumps(source), encoding="utf-8")
+        old = note_plan.generate(directory, detail="full")
+        legacy = dict(old)
+        legacy.pop("packet_detail")
+        legacy.pop("segment_times")
+        (directory / "note_plan.json").write_text(json.dumps(legacy), encoding="utf-8")
+        review = directory / "note_review.json"
+        review.write_text("已填审阅", encoding="utf-8")
+        compact = note_plan.generate(directory)  # 只改展示，旧来源无需 force。
+        assert compact["packet_detail"] == "compact"
+        assert compact["source_sha256"] == old["source_sha256"]
+        assert compact["settings"] == old["settings"]
+        assert compact["packets"] == old["packets"]
+        assert compact["segment_times"]["S000004"] == {"start": 30, "end": 40}
+        assert review.read_text(encoding="utf-8") == "已填审阅"
+        assert "[S000001@" in (directory / compact["packets"][0]["path"]).read_text(encoding="utf-8")
+        assert note_plan.main(["BVtest_p2", "--out", temporary, "--detail", "full"]) == 0
+        full_text = (directory / compact["packets"][0]["path"]).read_text(encoding="utf-8")
+        assert "```json" in full_text
+
+
+def test_candidate_location_cannot_break_short_table():
+    source = transcript()
+    sprite = {"sheets": [{"file": "sprite/a|b\n.png", "cells": [
+        {"pos": 0, "time": "00:00:10", "since": 0, "until": 15}]}]}
+    plan = note_plan.build_plan(source, sprite)
+    rendered = note_plan.render_packet(plan["packets"][0], note_plan._normalized_segments(source))
+    assert "sprite/a&#124;b .png" in rendered
+
+
+def test_lean_preserves_source_and_every_candidate_field_with_escaped_locations():
+    source = transcript(["  原句空白\n与下一行必须完整。", "继续验证结果。"])
+    sprite = {"sheets": [{"file": "sprite/a|b\\c\t\n.png", "cells": [
+        {"pos": 0, "time": "00:00:10", "since": 0, "until": 15}]}],
+        "candidates": [{"id": "C1", "time": "00:00:10", "since": 0, "until": 15, "weak": True},
+                       {"id": "C2", "time": "00:00:18", "since": 15, "until": 20}]}
+    plan = note_plan.build_plan(source, sprite)
+    text = note_plan.render_packet(plan["packets"][0], note_plan._normalized_segments(source), detail="lean")
+    assert all(segment["text"] in text for segment in source["segments"])
+    rows = text.split("```tsv\n", 1)[1].split("\n```", 1)[0].splitlines()
+    assert rows[0].split("\t") == ["id", "time", "since", "until", "weak", "overview_visible", "sheet", "pos"]
+    assert rows[1].split("\t") == ["C1", "00:00:10", "00:00:00", "00:00:15", "1", "1",
+                                     "sprite/a|b\\\\c\\t\\n.png", "0"]
+    assert rows[2].split("\t") == ["C2", "00:00:18", "00:00:15", "00:00:20", "0", "0", "-", "-"]
+    assert len(rows) == len(plan["packets"][0]["visual_candidates"]) + 1
+
+
+def test_catalog_selection_keeps_unsorted_overlaps_inclusive_boundaries_and_independent_entries():
+    sprite = {"candidates": [
+        {"id": "long", "time": "00:00:30", "since": 0, "until": 40},
+        {"id": "edge", "time": "00:00:10", "since": 10, "until": 20},
+        {"id": "invalid", "time": "bad"}], "sheets": []}
+    source = transcript()
+    plan = note_plan.build_plan(source, sprite, max_seconds=10)
+    assert len(plan["packets"]) == 4
+    assert [c["id"] for c in plan["packets"][0]["visual_candidates"]] == ["long", "edge"]
+    assert [c["id"] for c in plan["packets"][2]["visual_candidates"]] == ["long", "edge"]
+    assert [c["id"] for c in plan["packets"][3]["visual_candidates"]] == ["long"]
+    plan["packets"][0]["visual_candidates"][0]["sheet"] = "changed"
+    assert plan["packets"][1]["visual_candidates"][0]["sheet"] == ""

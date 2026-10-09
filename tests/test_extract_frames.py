@@ -10,6 +10,29 @@ from _helpers import make_video, still_image, write_png
 import extract_frames as ef
 
 
+def test_fallback_cli_uses_experiment_draft_without_changing_formal_book():
+    from pathlib import Path
+    previous = sys.argv
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        original = root / 'book.md'
+        original.write_text('Original notes', encoding='utf-8')
+        draft = root / 'book.assembled.md'
+        draft.write_text('![example](SCREENSHOT:00:00:00)', encoding='utf-8')
+        make_video(str(root / 'video_source.mp4'), seconds=1, kind='still')
+        sys.argv = ['extract_frames.py', 'BVtest1', '--out', tmp, '--book-name', 'book.assembled.md']
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ef.main()
+        finally:
+            sys.argv = previous
+        assert original.read_text(encoding='utf-8') == 'Original notes'
+        assert (root / 'images/shot_00_00_00.png').is_file()
+        assert 'images/shot_00_00_00.png' in draft.read_text(encoding='utf-8')
+        assert (root / 'book.assembled.tagged.md').is_file()
+        assert not (root / 'book.tagged.md').exists()
+
+
 def test_materialize_counts_only_replaced_images_and_refreshes_tagged():
     d = tempfile.mkdtemp(prefix="vs_materialize_")
     try:

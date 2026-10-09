@@ -45,13 +45,14 @@ original tagged draft is kept as book.tagged.md.
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from typing import List
 
-from extract_frames import materialize, current_source, requested_timestamps
+from extract_frames import materialize, current_source, requested_timestamps, draft_paths
 import timecode
 from video_id import split_bilibili_id
 
@@ -788,6 +789,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Capture frames directly from the platform player")
     ap.add_argument("video_id", nargs="?")
     ap.add_argument("video_url", nargs="?", default=None)
+    ap.add_argument('--out', type=Path, help='Video directory for an isolated experiment')
+    ap.add_argument('--book-name', default='book.md', help='Capture/materialize this draft and its own tagged copy')
     ap.add_argument("--method", default="auto", choices=["auto"] + METHOD_ORDER)
     ap.add_argument("--materialize-only", action="store_true",
                     help="skip capture; materialize placeholders from existing images only")
@@ -841,9 +844,11 @@ def main() -> None:
     if not args.video_id:
         ap.error("video_id is required (unless using --setup-profile)")
 
-    vdir = os.path.join(BASE_DIR, "output", args.video_id)
-    book = os.path.join(vdir, "book.md")
-    tagged = os.path.join(vdir, "book.tagged.md")
+    vdir = str(args.out.resolve()) if args.out else os.path.join(BASE_DIR, "output", args.video_id)
+    try:
+        book, tagged = draft_paths(vdir, args.book_name)
+    except ValueError as exc:
+        ap.error(str(exc))
     imgdir = os.path.join(vdir, "images")
     os.makedirs(imgdir, exist_ok=True)
 
@@ -910,7 +915,8 @@ def main() -> None:
 
     if used is None:
         sys.exit("\nAll browser capture methods failed. Use the fallback:\n"
-                 f'  python extract_frames.py {args.video_id} "{args.video_url or ""}"')
+                 f'  python src/extract_frames.py {args.video_id} "{args.video_url or ""}"'
+                 f' --out "{vdir}" --book-name {args.book_name}')
 
     write_manifest(vdir, args.video_id, platform, used, source_md, timestamps, results)
     print(f"manifest: output/{args.video_id}/{MANIFEST_NAME}（每张图实际截自哪一秒）")

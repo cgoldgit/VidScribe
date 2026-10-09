@@ -6,7 +6,9 @@ VidScribe 是一个由 AI 助手编排的视频内容整理工具，支持将 Yo
 
 默认笔记采用课堂实录风格，沿讲解顺序保留例子、推导、演示和结果。字幕先由本地工具分成完整阅读包，agent 按包写作并记录来源去向；图片按视觉需求查看，概览展示预算与完整候选目录分开，避免为了减少读图而丢掉候选。成品检查会报告缺图、待处理需求、含糊时间和相似图片，语义完整性仍需对照来源复核。
 
-Claude Code 的项目入口是 [CLAUDE.md](CLAUDE.md)。可直接要求它按 `instructions.md` 生成课堂实录式笔记，并完成 `note_review.json` 与 `note_audit.py --require-review` 检查。不同成本与质量方案、GitHub 参考和工程限制见 [quality_options.md](docs/quality_options.md)。
+Claude Code 的项目入口是 [CLAUDE.md](CLAUDE.md)。默认采用 [B 平衡流程](docs/balanced_workflow.md)：精简完整阅读包、独立章节上下文、范围审阅、本地合稿和独立图片核查，保留课堂实录细节。脚本只在显式执行 `run-one` 时调用本机 CC，其余准备、合稿和统计均在本地完成。不同成本与质量方案、GitHub 参考和工程限制见 [quality_options.md](docs/quality_options.md)。实际节省比例需要同视频运行验证。
+
+B 平衡流程还支持可选的结构化文字返回、已对照来源验收的文字包缓存，以及失败候选的局部修复和本地恢复。完整原句与写作规则保留，同任务锁防止重复调用；用量统计包含失败尝试，并单独记录缓存复用和本地恢复。用法见 [流程说明](docs/balanced_workflow.md)，测量结果与验证范围见 [优化报告](docs/performance_optimization_v3_2026-10-08.md)。
 
 ## 默认输出格式
 
@@ -31,6 +33,8 @@ VidScribe 默认生成 Markdown 成品，不自动渲染 HTML，也不启动本�
 - 提取 YouTube 和 Bilibili 的平台字幕，并检查字幕覆盖范围。
 - 在平台没有可用字幕时，使用 faster-whisper 在本地转写音频。
 - 为 Bilibili 视频生成带时间戳的画面索引，辅助选择关键画面。
+- 按完整字幕包独立写作，本地合稿并检查来源覆盖、事实记录和章末小结。
+- 复用已验收文字包，局部修复失败候选，并保留各次模型调用的用量记录。
 - 使用独立的 Chrome 配置保存登录状态，截取会员或登录后可见的视频画面。
 - 默认生成 Markdown 成品，并可按需渲染带视频时间锚点和播放器的 HTML 页面。
 - 将成品整理到独立的 `pages` 分支，供 GitHub Pages 发布。
@@ -96,6 +100,9 @@ https://www.bilibili.com/video/BVxxxxxxxxxx/
 | `note_plan.summary.md`、`note_plan.json`、`note_packets/` | 轻量阅读入口、完整清单与原句包，含来源 SHA 与候选画面线索 |
 | `note_review.json` | agent 填写的原句去向、视觉需求与审阅记录 |
 | `note_audit.json` | 本地文件、时间、审阅一致性和图片相似检查报告 |
+| `jobs/`、`visual_jobs/` | 独立文字和图片任务、草稿、候选及运行记录 |
+| `book.assembled.md`、`note_review.assembled.json` | 本地合稿的实验稿与审阅记录，验收后再生成正式成品 |
+| `note_usage.json` | 已记录的成功、失败尝试用量和费用估算，以及复用、恢复状态 |
 | `book.md` | 包含正文和图片引用的 Markdown 成品 |
 | `book.tagged.md` | 随当前稿同步的截图占位符对照稿 |
 | `images/` | 关键画面截图 |
@@ -176,6 +183,8 @@ git push origin pages
 | --- | --- |
 | `instructions.md` | AI 助手执行完整工作流时遵循的操作规程 |
 | `CLAUDE.md` | Claude Code 的精简项目入口 |
+| `AGENTS.md` | Codex 等助手的项目入口与独立任务规则 |
+| `docs/balanced_workflow.md` | 独立写作、合稿、缓存、恢复和验收的操作说明 |
 | `docs/quality_options.md` | 成本取舍、GitHub 参考与待验证能力 |
 | `ARCHITECTURE.md` | 系统模块、数据流、文件契约和安全边界 |
 | `src/` | 字幕、截图、渲染、合并与发布脚本 |
